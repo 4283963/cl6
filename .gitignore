@@ -26,6 +26,7 @@ logs/
 # 常见依赖与构建输出
 node_modules/
 dist/
+dist-electron/
 build/
 out/
 target/

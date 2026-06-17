@@ -5,12 +5,14 @@ const os = require('os')
 const DeviceManager = require('./device-manager')
 const ClipboardMonitor = require('./clipboard-monitor')
 const ClipboardServer = require('./clipboard-server')
+const HistoryManager = require('./history-manager')
 
 let mainWindow = null
 let tray = null
 let deviceManager = null
 let clipboardMonitor = null
 let clipboardServer = null
+let historyManager = null
 
 const isDev = !app.isPackaged
 
@@ -137,6 +139,7 @@ function initServices() {
   try {
     deviceManager = new DeviceManager()
     clipboardMonitor = new ClipboardMonitor()
+    historyManager = new HistoryManager()
 
     const settings = deviceManager.getSettings()
 
@@ -146,8 +149,13 @@ function initServices() {
       () => deviceManager.getSettings().password
     )
 
+    historyManager.onHistoryChange = (history) => {
+      safeSendToRenderer('history:changed', history)
+    }
+
     clipboardServer.onReceive = (data) => {
       safeSendToRenderer('clipboard:received', data)
+      historyManager.addItem(data.text, data.from || 'remote')
     }
 
     clipboardServer.onDeviceDiscover = (device, added) => {
@@ -158,6 +166,7 @@ function initServices() {
 
     clipboardMonitor.onCopy((text) => {
       try {
+        historyManager.addItem(text, 'local')
         const devices = deviceManager.getDevices()
         const password = deviceManager.getSettings().password
         if (password && devices.length > 0) {
@@ -273,6 +282,58 @@ function setupIpc() {
   ipcMain.handle('app:hide', () => {
     if (mainWindow) {
       mainWindow.hide()
+    }
+  })
+
+  ipcMain.handle('history:get', () => {
+    try {
+      return historyManager.getHistory()
+    } catch (e) {
+      console.error('Error in history:get:', e)
+      return []
+    }
+  })
+
+  ipcMain.handle('history:add', (_, text) => {
+    try {
+      return historyManager.addItem(text, 'manual')
+    } catch (e) {
+      console.error('Error in history:add:', e)
+      return null
+    }
+  })
+
+  ipcMain.handle('history:remove', (_, id) => {
+    try {
+      return historyManager.removeItem(id)
+    } catch (e) {
+      console.error('Error in history:remove:', e)
+      return false
+    }
+  })
+
+  ipcMain.handle('history:clear', () => {
+    try {
+      historyManager.clearAll()
+      return true
+    } catch (e) {
+      console.error('Error in history:clear:', e)
+      return false
+    }
+  })
+
+  ipcMain.handle('history:copy', (_, id) => {
+    try {
+      const item = historyManager.getItem(id)
+      if (item) {
+        clipboardMonitor.setText(item.text)
+        historyManager.addItem(item.text, 'manual')
+        return true
+      }
+      return false
+    } catch (e) {
+      console.error('Error in history:copy:', e)
+      return false
     }
   })
 }

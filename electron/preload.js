@@ -23,5 +23,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onDeviceDiscovered: (callback) => {
     ipcRenderer.on('device:discovered', (_, device) => callback(device))
+  },
+
+  getHistory: () => ipcRenderer.invoke('history:get'),
+  addHistoryItem: (text) => ipcRenderer.invoke('history:add', text),
+  removeHistoryItem: (id) => ipcRenderer.invoke('history:remove', id),
+  clearHistory: () => ipcRenderer.invoke('history:clear'),
+  copyHistoryItem: (id) => ipcRenderer.invoke('history:copy', id),
+
+  onHistoryChanged: (callback) => {
+    ipcRenderer.on('history:changed', (_, history) => callback(history))
   }
 })

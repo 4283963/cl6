@@ -14,145 +14,222 @@ let clipboardServer = null
 
 const isDev = !app.isPackaged
 
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error)
+  console.error('Stack:', error.stack)
+})
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason)
+})
+
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 500,
-    height: 650,
-    resizable: true,
-    minimizable: true,
-    maximizable: false,
-    title: '局域网剪贴板同步',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  })
+  try {
+    mainWindow = new BrowserWindow({
+      width: 500,
+      height: 650,
+      resizable: true,
+      minimizable: true,
+      maximizable: false,
+      title: '局域网剪贴板同步',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    })
 
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+    if (isDev) {
+      mainWindow.loadURL('http://localhost:5173')
+    } else {
+      mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+    }
+
+    mainWindow.on('close', (e) => {
+      if (!app.isQuitting) {
+        e.preventDefault()
+        mainWindow.hide()
+      }
+    })
+
+    mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+      console.error('Window load failed:', errorCode, errorDescription)
+    })
+  } catch (e) {
+    console.error('Error creating window:', e)
   }
-
-  mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault()
-      mainWindow.hide()
-    }
-  })
 }
 
 function createTray() {
-  const icon = nativeImage.createEmpty()
-  tray = new Tray(icon)
-  tray.setToolTip('局域网剪贴板同步')
+  try {
+    const icon = nativeImage.createEmpty()
+    tray = new Tray(icon)
+    tray.setToolTip('局域网剪贴板同步')
 
-  const contextMenu = Menu.buildFromTemplate([
-    { label: '显示窗口', click: () => showWindow() },
-    { type: 'separator' },
-    { label: '退出', click: () => quitApp() }
-  ])
+    const contextMenu = Menu.buildFromTemplate([
+      { label: '显示窗口', click: () => showWindow() },
+      { type: 'separator' },
+      { label: '退出', click: () => quitApp() }
+    ])
 
-  tray.setContextMenu(contextMenu)
-  tray.on('click', () => showWindow())
+    tray.setContextMenu(contextMenu)
+    tray.on('click', () => showWindow())
+  } catch (e) {
+    console.error('Error creating tray:', e)
+  }
 }
 
 function showWindow() {
   if (mainWindow) {
-    mainWindow.show()
-    mainWindow.focus()
+    try {
+      mainWindow.show()
+      mainWindow.focus()
+    } catch (e) {
+      console.error('Error showing window:', e)
+    }
   }
 }
 
 function quitApp() {
   app.isQuitting = true
-  if (clipboardMonitor) {
-    clipboardMonitor.stop()
-  }
-  if (clipboardServer) {
-    clipboardServer.stop()
+  try {
+    if (clipboardMonitor) {
+      clipboardMonitor.stop()
+    }
+    if (clipboardServer) {
+      clipboardServer.stop()
+    }
+  } catch (e) {
+    console.error('Error during shutdown:', e)
   }
   app.quit()
 }
 
 function getLocalIPs() {
-  const interfaces = os.networkInterfaces()
-  const ips = []
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) {
-        ips.push(iface.address)
+  try {
+    const interfaces = os.networkInterfaces()
+    const ips = []
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          ips.push(iface.address)
+        }
       }
     }
+    return ips
+  } catch (e) {
+    console.error('Error getting local IPs:', e)
+    return []
   }
-  return ips
+}
+
+function safeSendToRenderer(channel, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, data)
+    } catch (e) {
+      console.error('Error sending to renderer:', channel, e)
+    }
+  }
 }
 
 function initServices() {
-  deviceManager = new DeviceManager()
-  clipboardMonitor = new ClipboardMonitor()
+  try {
+    deviceManager = new DeviceManager()
+    clipboardMonitor = new ClipboardMonitor()
 
-  const settings = deviceManager.getSettings()
+    const settings = deviceManager.getSettings()
 
-  clipboardServer = new ClipboardServer(
-    deviceManager,
-    clipboardMonitor,
-    () => deviceManager.getSettings().password
-  )
+    clipboardServer = new ClipboardServer(
+      deviceManager,
+      clipboardMonitor,
+      () => deviceManager.getSettings().password
+    )
 
-  clipboardServer.onReceive = (data) => {
-    if (mainWindow) {
-      mainWindow.webContents.send('clipboard:received', data)
+    clipboardServer.onReceive = (data) => {
+      safeSendToRenderer('clipboard:received', data)
     }
+
+    clipboardServer.onDeviceDiscover = (device, added) => {
+      if (added) {
+        safeSendToRenderer('device:discovered', device)
+      }
+    }
+
+    clipboardMonitor.onCopy((text) => {
+      try {
+        const devices = deviceManager.getDevices()
+        const password = deviceManager.getSettings().password
+        if (password && devices.length > 0) {
+          devices.forEach(device => {
+            clipboardServer.sendClipboard(device, text, password)
+              .catch(err => {
+                console.error('Send failed to', device ? device.name : 'unknown', ':', err.message)
+              })
+          })
+        }
+      } catch (e) {
+        console.error('Error in onCopy handler:', e)
+      }
+    })
+
+    clipboardMonitor.start()
+    clipboardServer.start(settings.port)
+  } catch (e) {
+    console.error('Error initializing services:', e)
   }
-
-  clipboardServer.onDeviceDiscover = (device, added) => {
-    if (mainWindow && added) {
-      mainWindow.webContents.send('device:discovered', device)
-    }
-  }
-
-  clipboardMonitor.onCopy((text) => {
-    const devices = deviceManager.getDevices()
-    const password = deviceManager.getSettings().password
-    if (password && devices.length > 0) {
-      devices.forEach(device => {
-        clipboardServer.sendClipboard(device, text, password)
-          .catch(err => console.error('Send failed to', device.name, err.message))
-      })
-    }
-  })
-
-  clipboardMonitor.start()
-  clipboardServer.start(settings.port)
 }
 
 function setupIpc() {
   ipcMain.handle('settings:get', () => {
-    return deviceManager.getSettings()
+    try {
+      return deviceManager.getSettings()
+    } catch (e) {
+      console.error('Error in settings:get:', e)
+      return { deviceName: '', password: '', port: 37248 }
+    }
   })
 
   ipcMain.handle('settings:update', (_, newSettings) => {
-    deviceManager.updateSettings(newSettings)
-    const settings = deviceManager.getSettings()
-    if (clipboardServer && settings.port !== clipboardServer.port) {
-      clipboardServer.start(settings.port)
+    try {
+      deviceManager.updateSettings(newSettings)
+      const settings = deviceManager.getSettings()
+      if (clipboardServer && settings.port !== clipboardServer.port) {
+        clipboardServer.start(settings.port)
+      }
+      return settings
+    } catch (e) {
+      console.error('Error in settings:update:', e)
+      return deviceManager.getSettings()
     }
-    return settings
   })
 
   ipcMain.handle('devices:get', () => {
-    return deviceManager.getDevices()
+    try {
+      return deviceManager.getDevices()
+    } catch (e) {
+      console.error('Error in devices:get:', e)
+      return []
+    }
   })
 
   ipcMain.handle('devices:add', (_, device) => {
-    return deviceManager.addDevice(device)
+    try {
+      return deviceManager.addDevice(device)
+    } catch (e) {
+      console.error('Error in devices:add:', e)
+      return false
+    }
   })
 
   ipcMain.handle('devices:remove', (_, deviceId) => {
-    deviceManager.removeDevice(deviceId)
-    return true
+    try {
+      deviceManager.removeDevice(deviceId)
+      return true
+    } catch (e) {
+      console.error('Error in devices:remove:', e)
+      return false
+    }
   })
 
   ipcMain.handle('devices:ping', async (_, ip, port) => {
@@ -161,17 +238,28 @@ function setupIpc() {
       deviceManager.addDevice(device)
       return { success: true, device }
     } catch (e) {
+      console.error('Error in devices:ping:', e)
       return { success: false, error: e.message }
     }
   })
 
   ipcMain.handle('clipboard:get', () => {
-    return clipboardMonitor.getText()
+    try {
+      return clipboardMonitor.getText()
+    } catch (e) {
+      console.error('Error in clipboard:get:', e)
+      return ''
+    }
   })
 
   ipcMain.handle('clipboard:set', (_, text) => {
-    clipboardMonitor.setText(text)
-    return true
+    try {
+      clipboardMonitor.setText(text)
+      return true
+    } catch (e) {
+      console.error('Error in clipboard:set:', e)
+      return false
+    }
   })
 
   ipcMain.handle('network:ips', () => {
@@ -196,10 +284,14 @@ app.whenReady().then(() => {
   createTray()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-    } else if (mainWindow) {
-      mainWindow.show()
+    try {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+      } else if (mainWindow) {
+        mainWindow.show()
+      }
+    } catch (e) {
+      console.error('Error in activate handler:', e)
     }
   })
 })
@@ -208,4 +300,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     // Don't quit, keep running in tray
   }
+})
+
+app.on('error', (error) => {
+  console.error('App error:', error)
 })
